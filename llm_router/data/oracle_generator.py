@@ -70,13 +70,18 @@ class OracleDatasetGenerator:
                     max_tokens=512,
                 )
 
-                # Get large model answer
+                # Get large model answer (using gemini-2.0-flash as "large" - more capable than 2.5-flash)
                 large_answer = self.client.generate(
-                    model_id="gemini-2.5-pro",
+                    model_id="gemini-2.0-flash",
                     prompt=example.query,
                     temperature=0.7,
                     max_tokens=512,
                 )
+
+                # Skip if either answer is blocked or errored
+                if medium_answer.startswith("[") or large_answer.startswith("["):
+                    logger.warning(f"Skipping example {idx}: medium={medium_answer[:50]}, large={large_answer[:50]}")
+                    continue
 
                 results.append({
                     "query": example.query,
@@ -88,7 +93,7 @@ class OracleDatasetGenerator:
                 })
 
                 # Save periodically
-                if (idx + 1) % batch_size == 0:
+                if len(results) > 0 and len(results) % batch_size == 0:
                     self._save_jsonl(results, output_file)
                     logger.info(f"Saved {len(results)} results to {output_file}")
 

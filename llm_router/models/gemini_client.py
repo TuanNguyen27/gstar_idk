@@ -60,17 +60,57 @@ class GeminiClient:
         if json_mode:
             generation_config["response_mime_type"] = "application/json"
 
+        # Adjusted safety settings to reduce blocking
+        safety_settings = [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_ONLY_HIGH"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_ONLY_HIGH"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_ONLY_HIGH"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_ONLY_HIGH"},
+        ]
+
         for attempt in range(retry_count):
             try:
                 response = model.generate_content(
                     prompt,
                     generation_config=generation_config,
+                    safety_settings=safety_settings,
                 )
-                return response.text
+
+                # Check for blocked content BEFORE accessing .text
+                if hasattr(response, 'candidates') and response.candidates:
+                    candidate = response.candidates[0]
+                    if hasattr(candidate, 'finish_reason'):
+                        finish_reason = candidate.finish_reason
+                        reason_name = str(finish_reason)
+
+                        # Only block on actual error conditions
+                        if 'SAFETY' in reason_name:
+                            return "[BLOCKED: Safety filter]"
+                        elif 'RECITATION' in reason_name:
+                            return "[BLOCKED: Recitation]"
+                        elif 'OTHER' in reason_name:
+                            return "[BLOCKED: Other]"
+                        # If STOP or MAX_TOKENS, proceed to get text
+
+                # Now safely try to access text
+                try:
+                    if response.text:
+                        return response.text
+                except:
+                    pass
+
+                return "[ERROR: No valid response]"
 
             except Exception as e:
+                # Check if it's a safety/blocking error
+                error_msg = str(e)
+                if "finish_reason" in error_msg and "is 2" in error_msg:
+                    return "[BLOCKED: Safety filter]"
+                if "finish_reason" in error_msg and "is 3" in error_msg:
+                    return "[BLOCKED: Recitation]"
+
                 if attempt == retry_count - 1:
-                    raise RuntimeError(f"Failed after {retry_count} attempts: {e}")
+                    return f"[ERROR: {error_msg}]"
                 time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
 
         raise RuntimeError("Should not reach here")
@@ -112,7 +152,7 @@ Examples:
 Respond ONLY with valid JSON."""
 
         response_text = self.generate(
-            model_id="gemini-2.5-pro",
+            model_id="gemini-2.0-flash",
             prompt=judge_prompt,
             temperature=0.0,  # Deterministic judging
             max_tokens=256,
@@ -138,21 +178,24 @@ Respond ONLY with valid JSON."""
         Returns:
             One-sentence description of query characteristics
         """
-        analyzer_prompt = f"""Analyze the following query and describe its characteristics in one sentence.
+        analyzer_prompt = f"""Analyze the following query and describe its characteristics in one sentence. Focus on what makes it simple/complex, common/niche, verifiable/ambiguous.
 
 Query: {query}
 
-Examples:
-- "This is a simple arithmetic question"
-- "This is a niche, complex question about theoretical physics"
-- "This is a straightforward factual question about history"
-- "This is an ambiguous or unanswerable question"
+Good examples:
+- "Simple arithmetic requiring basic calculation"
+- "Obscure historical fact about a lesser-known figure requiring specialized knowledge"
+- "Common knowledge question about a widely-known celebrity"
+- "Highly specific question about recent pop culture requiring up-to-date information"
+- "Ambiguous question missing context or asking about non-existent information"
+- "Niche technical question requiring domain expertise"
+- "Well-known historical event that is widely documented"
 
-Respond with ONLY the one-sentence analysis, no additional text."""
+Respond with ONLY the one-sentence analysis focusing on complexity and domain, no additional text."""
 
         return self.generate(
-            model_id="gemini-2.5-pro",
+            model_id="gemini-2.0-flash",
             prompt=analyzer_prompt,
-            temperature=0.3,
-            max_tokens=100,
+            temperature=0.5,
+            max_tokens=150,
         ).strip()

@@ -2,14 +2,24 @@
 
 A flexible, efficient router that intelligently directs queries to the optimal LLM (e.g., Gemini Flash vs Pro) based on query complexity, reducing costs while maintaining accuracy.
 
-## 🎯 Key Features
+## 🎯 Project Overview
 
-- **Decoupled Architecture**: Router learns policies, not hard-coded models
-- **In-Context Routes**: Adaptable to new models without retraining
-- **Oracle-Based Training**: Ground truth from comparative model performance
-- **Bias Mitigation**: Blind judging prevents self-preference
-- **Two-Stage Training**: SFT + DPO for optimal routing decisions
-- **Modal Integration**: Serverless training and inference
+This project explores two related research questions:
+
+1. **Primary**: Can a small language model (SLM) learn to route queries to appropriate LLMs based on complexity?
+2. **Secondary**: Can we train SLMs to provide calibrated confidence estimates for their answers?
+
+## 📊 Current Status: Model Calibration Research
+
+We are currently investigating **confidence calibration** for small language models. See [CALIBRATION_RESEARCH.md](CALIBRATION_RESEARCH.md) for detailed findings.
+
+**Quick Summary:**
+- **Problem**: SLMs are poorly calibrated (RMS error: 0.3888 baseline)
+- **Approaches Tested**: DPO, Implicit Calibration, Standard SFT
+- **Best Result So Far**: DPO v2 (RMS 0.3060, 21% improvement) but outputs flat 0.5 confidence
+- **Status**: Training SFT and re-evaluating implicit calibration with bug fixes
+
+---
 
 ## 🏗️ Architecture
 
@@ -36,9 +46,116 @@ export MODAL_TOKEN_ID="your-modal-token"
 export MODAL_TOKEN_SECRET="your-modal-secret"
 ```
 
-## 🚀 Quick Start
+---
 
-### Step 1: Generate Oracle Dataset
+## 🔬 Research Workflows
+
+### A. Model Calibration Experiments
+
+**Goal**: Train SLMs to output calibrated confidence scores alongside their answers.
+
+#### 1. Generate Baseline SLM Answers
+
+```bash
+# Run SLM inference on benchmark (SimpleQA)
+modal run scripts/modal_slm_baseline.py \
+  --model google/gemma-2-2b-it
+
+# Output: data/slm_baseline/google_gemma-2-2b-it_results.jsonl
+```
+
+#### 2. Judge Answers for Correctness
+
+```bash
+# Use Gemini Pro to judge correctness
+export GEMINI_API_KEY="your-key"
+python3 evaluation/judge_slm_answers_async.py \
+  --input data/slm_baseline/google_gemma-2-2b-it_results.jsonl \
+  --output data/slm_baseline/google_gemma-2-2b-it_judged.jsonl \
+  --max-concurrent 100
+
+# Output: Judged dataset with is_correct labels
+```
+
+#### 3. Generate Calibration Training Data
+
+**DPO (Explicit Confidence):**
+```bash
+python3 data/generate_dpo_calibration_data.py \
+  --judged-data data/slm_baseline/google_gemma-2-2b-it_judged.jsonl \
+  --output data/slm_baseline/google_gemma-2-2b-it_dpo_pairs_v2.jsonl
+
+# Output: (chosen, rejected) preference pairs
+```
+
+**SFT (Direct Supervision):**
+```bash
+python3 data/generate_sft_calibration_data.py \
+  --judged-data data/slm_baseline/google_gemma-2-2b-it_judged.jsonl \
+  --output data/slm_baseline/google_gemma-2-2b-it_sft_calibration.jsonl
+
+# Output: (input, output) supervised pairs
+```
+
+#### 4. Train Calibrated Models
+
+**DPO Training:**
+```bash
+modal run scripts/modal_dpo_training.py \
+  --model google/gemma-2-2b-it \
+  --dpo-data data/slm_baseline/google_gemma-2-2b-it_dpo_pairs_v2.jsonl \
+  --learning-rate 1e-5 \
+  --num-epochs 3
+
+# Saves to: /vol/dpo_models/google_gemma-2-2b-it_calibrated
+```
+
+**Implicit Calibration (Logprob-based):**
+```bash
+modal run scripts/modal_implicit_calibration_training.py \
+  --model google/gemma-2-2b-it \
+  --judged-data data/slm_baseline/google_gemma-2-2b-it_judged.jsonl \
+  --learning-rate 1e-5 \
+  --num-epochs 3 \
+  --calibration-weight 0.1
+
+# Saves to: /vol/implicit_calibrated_models/google_gemma-2-2b-it_calibrated
+```
+
+**Standard SFT:**
+```bash
+modal run scripts/modal_sft_calibration_training.py \
+  --model google/gemma-2-2b-it \
+  --sft-data data/slm_baseline/google_gemma-2-2b-it_sft_calibration.jsonl \
+  --learning-rate 1e-5 \
+  --num-epochs 3
+
+# Saves to: /vol/sft_models/google_gemma-2-2b-it_calibrated
+```
+
+#### 5. Evaluate Calibration
+
+```bash
+# Evaluate DPO model
+modal run scripts/modal_evaluate_calibration.py \
+  --model-path /vol/dpo_models/google_gemma-2-2b-it_calibrated \
+  --test-data data/slm_baseline/google_gemma-2-2b-it_judged.jsonl \
+  --model-type dpo
+
+# Evaluate implicit calibration model
+modal run scripts/modal_evaluate_calibration.py \
+  --model-path /vol/implicit_calibrated_models/google_gemma-2-2b-it_calibrated \
+  --test-data data/slm_baseline/google_gemma-2-2b-it_judged.jsonl \
+  --model-type implicit
+
+# Outputs: RMS calibration error, accuracy, confidence distribution
+```
+
+---
+
+### B. Router Training (Original Goal)
+
+#### 1. Generate Oracle Dataset
 
 ```bash
 python scripts/generate_oracle_dataset.py \
@@ -47,29 +164,34 @@ python scripts/generate_oracle_dataset.py \
   --output-dir ./data/generated \
   --limit 1000 \
   --gemini-api-key $GEMINI_API_KEY
+
+# Output: Oracle dataset with routing policies
 ```
 
-### Step 2: Prepare Training Data
+#### 2. Prepare Training Data
 
 ```bash
 python scripts/prepare_training_data.py \
   --oracle-file ./data/generated/oracle_dataset.jsonl \
   --output-dir ./data/training
+
+# Output: SFT and DPO training files
 ```
 
-### Step 3: Train Router (Modal)
+#### 3. Train Router
 
 ```bash
-cd training
-modal run modal_train_router.py \
+modal run training/modal_train_router.py \
   --model-name google/gemma-2b \
   --sft-data-path ../data/training/sft_train.jsonl \
   --dpo-data-path ../data/training/dpo_train.jsonl \
   --sft-epochs 3 \
   --dpo-epochs 1
+
+# Output: Trained router checkpoint
 ```
 
-### Step 4: Test Router
+#### 4. Test Router
 
 ```bash
 # Routing only
@@ -85,15 +207,118 @@ python scripts/test_router.py \
   --gemini-api-key $GEMINI_API_KEY
 ```
 
-### Step 5: Deploy (Modal)
+---
 
-```bash
-cd deployment
-modal deploy modal_inference.py
+## 📁 Project Structure
 
-# Test deployed router
-modal run modal_inference.py --query "What is 2+2?"
 ```
+llm_router/
+├── config/                      # Model and policy configurations
+│   ├── models.py
+│   └── oracle_matrix.py
+├── data/                        # Dataset generators
+│   ├── benchmark_loader.py
+│   ├── oracle_generator.py
+│   ├── generate_dpo_calibration_data.py
+│   ├── generate_sft_calibration_data.py
+│   └── slm_baseline/            # Generated SLM baseline data
+├── evaluation/                  # Judging and evaluation
+│   ├── judge_slm_answers.py
+│   └── judge_slm_answers_async.py
+├── scripts/                     # Training and evaluation scripts
+│   ├── modal_slm_baseline.py            # Generate SLM answers
+│   ├── modal_dpo_training.py            # DPO calibration training
+│   ├── modal_implicit_calibration_training.py  # Implicit training
+│   ├── modal_sft_calibration_training.py       # SFT training
+│   ├── modal_evaluate_calibration.py    # Evaluate calibration
+│   └── modal_train_router.py            # Train router (original goal)
+├── models/                      # Model clients
+│   ├── gemini_client.py
+│   └── vllm_client.py
+├── CALIBRATION_RESEARCH.md      # Detailed research findings
+└── README.md
+```
+
+---
+
+## 📊 Key Metrics
+
+### Calibration Metrics
+
+- **RMS Calibration Error**: Root mean square error between predicted confidence and actual accuracy (lower is better)
+- **Accuracy**: Percentage of correct answers
+- **Average Confidence**: Mean confidence across all predictions
+- **Calibration Curve**: Confidence vs accuracy binned plot
+
+### Router Metrics (Future)
+
+- **Routing Accuracy**: Percentage of queries routed to optimal model
+- **Cost Savings**: Percentage reduction in API costs
+- **Quality Maintenance**: Accuracy on complex queries
+
+---
+
+## 🔧 Configuration
+
+### Models Used
+
+**Small Language Models (for routing/calibration):**
+- `google/gemma-2-2b-it` (primary)
+- `google/gemma-2-9b-it`
+- `Qwen/Qwen2.5-1.5B-Instruct`
+
+**Target LLMs (for routing):**
+- **Medium**: `gemini-2.5-flash`
+- **Large**: `gemini-2.5-pro`
+
+**Judge Model:**
+- `gemini-2.5-pro`
+
+### Training Configuration
+
+```python
+# LoRA Configuration
+lora_config = {
+    "r": 8,
+    "lora_alpha": 16,
+    "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"],
+    "lora_dropout": 0.05,
+    "bias": "none",
+}
+
+# Training Hyperparameters
+training_args = {
+    "learning_rate": 1e-5,
+    "num_train_epochs": 3,
+    "per_device_train_batch_size": 4,
+    "gradient_accumulation_steps": 4,
+    "warmup_steps": 100,
+}
+```
+
+---
+
+## 📈 Current Research Findings
+
+See [CALIBRATION_RESEARCH.md](CALIBRATION_RESEARCH.md) for detailed findings.
+
+**Summary of Calibration Experiments:**
+
+| Approach | RMS Calibration Error | Accuracy | Notes |
+|----------|----------------------|----------|-------|
+| **Baseline** (uncalibrated) | 0.3888 | 19.4% | Poor calibration |
+| **DPO v1** | 0.3888 | 19.4% | No improvement (bug in data) |
+| **DPO v2** | 0.3060 | 19.4% | 21% improvement, but flat 0.5 confidence |
+| **Implicit** (buggy) | 0.1940 | 19.4% | All 0.0 confidence (evaluation bug) |
+| **Implicit** (fixed) | Running... | Running... | Bug fixed, re-evaluating |
+| **Standard SFT** | Training... | Training... | In progress |
+
+**Key Bugs Discovered and Fixed:**
+1. DPO v1 data had swapped chosen/rejected pairs
+2. Implicit evaluation computed logprobs of INPUT instead of OUTPUT tokens
+3. SFT data generation wrote literal `'\n'` instead of newlines
+
+---
 
 ## 📊 Oracle Logic (9-Cell Matrix)
 
@@ -109,118 +334,46 @@ modal run modal_inference.py --query "What is 2+2?"
 | IDK          | Incorrect   | Ambiguous_Query  | IDK was safer                 |
 | IDK          | IDK         | Ambiguous_Query  | Both failed → don't escalate  |
 
-## 🔧 Configuration
-
-### Models (config/models.py)
-
-- **Router**: `google/gemma-2b` (or `Qwen/Qwen2.5-1.5B`)
-- **Medium**: `gemini-2.5-flash`
-- **Large**: `gemini-2.5-pro`
-- **Judge**: `gemini-2.5-pro`
-
-### Policies (deployment/policy_map.json)
-
-```json
-{
-  "Standard_Query": "gemini-2.5-flash",
-  "Complex_Query": "gemini-2.5-pro",
-  "Ambiguous_Query": "gemini-2.5-flash"
-}
-```
-
-Update this file to change model assignments without retraining!
-
-## 📁 Project Structure
-
-```
-llm_router/
-├── config/              # Model and policy configurations
-│   ├── models.py
-│   └── oracle_matrix.py
-├── data/                # Dataset loaders and generators
-│   ├── benchmark_loader.py
-│   └── oracle_generator.py
-├── training/            # Training pipelines
-│   ├── prompt_templates.py
-│   ├── dpo_data_prep.py
-│   ├── train_router.py
-│   └── modal_train_router.py
-├── deployment/          # Inference and deployment
-│   ├── router_inference.py
-│   ├── modal_inference.py
-│   └── policy_map.json
-├── scripts/             # Helper scripts
-│   ├── generate_oracle_dataset.py
-│   ├── prepare_training_data.py
-│   └── test_router.py
-└── README.md
-```
-
-## 🔬 Research Details
-
-### Phase 1: Foundation
-- Define models, policies, and oracle logic
-- Implement 9-cell matrix for ground truth labeling
-
-### Phase 2: Oracle Dataset Generation
-1. Load benchmark data (SimpleQA, Natural Questions, custom)
-2. Generate answers from Medium and Large models
-3. Blind judging to prevent bias
-4. Query analysis to prevent data leakage
-5. Apply oracle matrix to label policies
-
-### Phase 3: Training Data Preparation
-1. Convert oracle dataset to DPO format
-2. Generate reasoning chains (CoT)
-3. Create chosen/rejected pairs for preference learning
-
-### Phase 4: Model Training
-1. **Stage 1 (SFT)**: Teach task and format (3 epochs)
-2. **Stage 2 (DPO)**: Refine preferences (1 epoch)
-3. QLoRA (4-bit) for efficiency
-
-### Phase 5: Deployment
-1. Load trained router
-2. Parse routing decisions
-3. Map policies to models
-4. Execute on target LLM
+---
 
 ## 🎓 Key Innovations
 
 1. **Decoupled Logic**: Policies separate from models
 2. **Blind Judging**: Prevents judge self-preference
 3. **Query Analysis**: Prevents data leakage in reasoning
-4. **In-Context Routes**: XML-based route descriptions
-5. **DPO Training**: Preference optimization for better decisions
+4. **Multiple Calibration Approaches**: DPO, implicit, SFT
+5. **Comprehensive Evaluation**: RMS error, calibration curves
 
-## 📈 Expected Benefits
-
-- **Cost Reduction**: 40-60% by routing simple queries to Flash
-- **Quality Maintenance**: Complex queries escalated to Pro
-- **Flexibility**: Change models via JSON, no retraining
-- **Efficiency**: Small router (2B params) with fast inference
+---
 
 ## 🤝 Contributing
 
 This is a research implementation. Key areas for improvement:
 
 - Additional benchmarks (MMLU, TruthfulQA)
-- Alternative router models (Phi-2, Mistral-7B)
+- Alternative calibration methods (Temperature scaling, Platt scaling)
 - Multi-model routing (3+ models)
 - Cost-accuracy tradeoff analysis
 - Production optimization
+
+---
 
 ## 📄 License
 
 MIT License - See LICENSE file
 
+---
+
 ## 🙏 Acknowledgments
 
 Inspired by:
-- Arch-Router architecture
+- Calibration research (Guo et al., 2017)
+- DPO training (Rafailov et al., 2023)
 - Google's Gemini model family
 - TRL library for RLHF/DPO
 - Modal for serverless compute
+
+---
 
 ## 📧 Contact
 
