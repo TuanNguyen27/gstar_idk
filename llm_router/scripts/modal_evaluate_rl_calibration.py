@@ -18,6 +18,8 @@ eval_image = (
         "transformers==4.45.2",
         "peft==0.13.0",
         "scikit-learn",
+        "bitsandbytes==0.44.0",
+        "accelerate",
     )
 )
 
@@ -321,8 +323,8 @@ def main(
 
     upload_test_data.remote(test_content, remote_test_path)
 
-    # Run evaluation
-    output_path = f"{VOLUME_PATH}/evaluations/rl_calibration_results.json"
+    # Run evaluation with model-type-specific output path
+    output_path = f"{VOLUME_PATH}/evaluations/{model_type}_calibration_results.json"
 
     print(f"\nRunning evaluation...")
     results = evaluate_calibration.remote(
@@ -332,7 +334,7 @@ def main(
     )
 
     print(f"\n{'='*80}")
-    print("EVALUATION COMPLETE")
+    print(f"EVALUATION COMPLETE ({model_type.upper()})")
     print(f"{'='*80}")
     print(f"\nKey Metrics:")
     print(f"  Accuracy: {results['metrics']['accuracy']:.4f}")

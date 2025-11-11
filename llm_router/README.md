@@ -133,6 +133,34 @@ modal run scripts/modal_sft_calibration_training.py \
 # Saves to: /vol/sft_models/google_gemma-2-2b-it_calibrated
 ```
 
+**RL-Based Calibration (REINFORCE):**
+```bash
+modal run scripts/modal_rl_calibration_vllm.py \
+  --model google/gemma-2-2b-it \
+  --judged-data data/slm_baseline/google_gemma-2-2b-it_judged.jsonl \
+  --learning-rate 1e-5 \
+  --num-epochs 3 \
+  --lambda-sharp 0.3 \
+  --lambda-extreme 0.2
+
+# Anti-collapse rewards with REINFORCE policy gradient
+# Saves to: /vol/rl_calibrated_models/google_gemma-2-2b-it_rl_vllm
+```
+
+**GRPO Calibration (Group Relative Policy Optimization):**
+```bash
+modal run scripts/modal_grpo_calibration_vllm.py \
+  --model google/gemma-2-2b-it \
+  --judged-data data/slm_baseline/google_gemma-2-2b-it_judged.jsonl \
+  --learning-rate 1e-5 \
+  --num-epochs 3 \
+  --lambda-sharp 0.3 \
+  --lambda-extreme 0.2
+
+# Variance-reduced RL with batch-normalized rewards
+# Saves to: /vol/grpo_calibrated_models/google_gemma-2-2b-it_grpo_vllm
+```
+
 #### 5. Evaluate Calibration
 
 ```bash
@@ -148,7 +176,17 @@ modal run scripts/modal_evaluate_calibration.py \
   --test-data data/slm_baseline/google_gemma-2-2b-it_judged.jsonl \
   --model-type implicit
 
-# Outputs: RMS calibration error, accuracy, confidence distribution
+# Evaluate REINFORCE (RL) model
+modal run scripts/modal_evaluate_rl_calibration.py \
+  --test-data data/slm_baseline/google_gemma-2-2b-it_judged.jsonl \
+  --model-type rl
+
+# Evaluate GRPO model
+modal run scripts/modal_evaluate_rl_calibration.py \
+  --test-data data/slm_baseline/google_gemma-2-2b-it_judged.jsonl \
+  --model-type grpo
+
+# Outputs: RMS calibration error, ECE, accuracy, confidence distribution
 ```
 
 ---
@@ -230,7 +268,10 @@ llm_router/
 │   ├── modal_dpo_training.py            # DPO calibration training
 │   ├── modal_implicit_calibration_training.py  # Implicit training
 │   ├── modal_sft_calibration_training.py       # SFT training
+│   ├── modal_rl_calibration_vllm.py     # REINFORCE RL training
+│   ├── modal_grpo_calibration_vllm.py   # GRPO RL training
 │   ├── modal_evaluate_calibration.py    # Evaluate calibration
+│   ├── modal_evaluate_rl_calibration.py # Evaluate RL models
 │   └── modal_train_router.py            # Train router (original goal)
 ├── models/                      # Model clients
 │   ├── gemini_client.py
